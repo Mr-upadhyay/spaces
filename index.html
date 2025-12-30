@@ -1,0 +1,1035 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Study OS</title>
+    <!-- Tailwind CSS -->
+    <script src="https://cdn.tailwindcss.com"></script>
+    <script>
+        tailwind.config = {
+            darkMode: 'class',
+            theme: {
+                extend: {
+                    colors: {
+                        slate: { 850: '#1e293b' }
+                    }
+                }
+            }
+        }
+    </script>
+    <!-- Lucide Icons -->
+    <script src="https://unpkg.com/lucide@latest"></script>
+    <!-- JSZip for Downloads -->
+    <script src="https://cdnjs.cloudflare.com/ajax/libs/jszip/3.10.1/jszip.min.js"></script>
+    <style>
+        body { overflow: hidden; touch-action: none; }
+        .window { transition: box-shadow 0.2s, transform 0.05s; will-change: transform, width, height; }
+        .window.maximizing { transition: transform 0.3s ease-in-out, width 0.3s ease-in-out, height 0.3s ease-in-out; }
+        iframe { pointer-events: auto; }
+        .dragging iframe { pointer-events: none; }
+        
+        /* Grid Backgrounds */
+        .bg-grid-light {
+            background-image: radial-gradient(#cbd5e1 1px, transparent 1px);
+            background-size: 24px 24px;
+        }
+        .dark .bg-grid-light {
+            background-image: radial-gradient(#334155 1px, transparent 1px);
+        }
+
+        /* Ghost Mode Styles */
+        body.ghost-mode .window {
+            transition: opacity 0.2s ease, background-color 0.2s ease, border-color 0.2s ease, box-shadow 0.2s ease;
+        }
+        
+        /* Apply ghosting only if NOT hovering AND NOT active */
+        body.ghost-mode .window:not(:hover):not(.window-active) {
+            background-color: transparent !important;
+            border-color: transparent !important;
+            box-shadow: none !important;
+        }
+        body.ghost-mode .window:not(:hover):not(.window-active) .window-header,
+        body.ghost-mode .window:not(:hover):not(.window-active) .resize-handle {
+            opacity: 0;
+            pointer-events: none;
+        }
+        body.ghost-mode .window:not(:hover):not(.window-active) .window-content {
+            background-color: transparent !important;
+        }
+        body.ghost-mode .window:not(:hover):not(.window-active) textarea {
+            background-color: transparent !important;
+        }
+        body.ghost-mode .window:not(:hover):not(.window-active) .window-content > div {
+            background-color: transparent !important;
+        }
+
+        /* INTERACTION MODES */
+        /* Space: Move Window */
+        body.space-pressed .window-content,
+        body.space-pressed iframe, 
+        body.space-pressed textarea {
+            pointer-events: none !important;
+            cursor: move;
+        }
+
+        /* Ctrl: Pan Content */
+        body.ctrl-pressed .window-content,
+        body.ctrl-pressed iframe, 
+        body.ctrl-pressed textarea {
+            pointer-events: none !important; /* Pass events to container */
+            cursor: grab;
+        }
+        body.ctrl-pressed.panning .window-content {
+            cursor: grabbing;
+        }
+
+        /* Auto Hide Top Bar Logic */
+        #top-bar-container {
+            transition: transform 0.3s ease;
+            transform: translateY(0);
+        }
+        /* When active, hide by default */
+        body.auto-hide-bar #top-bar-container {
+            transform: translateY(-100%);
+        }
+        /* Reveal when triggering hover zone OR hovering bar itself OR menu is open */
+        body.auto-hide-bar #top-bar-trigger:hover ~ #top-bar-container,
+        body.auto-hide-bar #top-bar-container:hover,
+        body.auto-hide-bar #top-bar-container.menu-open {
+            transform: translateY(0);
+        }
+        
+        /* Trigger zone to reveal bar */
+        body.auto-hide-bar #top-bar-trigger {
+            display: block;
+        }
+        #top-bar-trigger {
+            display: none;
+            position: absolute;
+            top: 0;
+            left: 0;
+            width: 100%;
+            height: 15px; /* Strip at top */
+            z-index: 55;
+        }
+
+        /* Right Dock */
+        #right-dock {
+            position: absolute;
+            right: 0;
+            top: 50%;
+            transform: translateY(-50%);
+            display: flex;
+            flex-direction: column;
+            gap: 12px;
+            padding: 12px;
+            z-index: 60;
+            pointer-events: none; /* Pass clicks through container */
+        }
+        .dock-item {
+            pointer-events: auto;
+            transition: all 0.2s cubic-bezier(0.175, 0.885, 0.32, 1.275);
+            background: rgba(255, 255, 255, 0.8);
+            backdrop-filter: blur(4px);
+            box-shadow: 0 4px 6px -1px rgba(0, 0, 0, 0.1), 0 2px 4px -1px rgba(0, 0, 0, 0.06);
+            transform-origin: right center;
+        }
+        .dark .dock-item {
+            background: rgba(30, 41, 59, 0.8);
+            box-shadow: 0 4px 6px -1px rgba(0, 0, 0, 0.5);
+        }
+        .dock-item:hover {
+            transform: scale(1.1) translateX(-8px);
+        }
+        .dock-item-label {
+            opacity: 0;
+            transition: opacity 0.2s;
+            pointer-events: none;
+            white-space: nowrap;
+        }
+        .dock-item:hover .dock-item-label {
+            opacity: 1;
+        }
+
+        /* Scrollbar */
+        ::-webkit-scrollbar { width: 8px; height: 8px; }
+        ::-webkit-scrollbar-track { background: transparent; }
+        ::-webkit-scrollbar-thumb { background: #cbd5e1; border-radius: 4px; }
+        ::-webkit-scrollbar-thumb:hover { background: #94a3b8; }
+        .dark ::-webkit-scrollbar-thumb { background: #475569; }
+        .dark ::-webkit-scrollbar-thumb:hover { background: #64748b; }
+    </style>
+</head>
+<body class="bg-slate-50 dark:bg-slate-950 font-sans text-slate-800 dark:text-slate-200 transition-colors duration-200">
+
+    <div id="app" class="h-full w-full relative">
+        <!-- Loading Screen -->
+        <div id="loading" class="fixed inset-0 bg-white dark:bg-slate-900 z-[100] flex flex-col items-center justify-center">
+            <div class="w-12 h-12 border-4 border-blue-600 border-t-transparent rounded-full animate-spin mb-4"></div>
+            <p class="text-gray-500 dark:text-gray-400">Booting Study OS...</p>
+        </div>
+
+        <!-- App Container -->
+        <div id="main-interface" class="h-full w-full hidden"></div>
+    </div>
+
+    <!-- Firebase SDKs -->
+    <script type="module">
+        import { initializeApp } from "https://www.gstatic.com/firebasejs/11.6.1/firebase-app.js";
+        import { getAuth, signInAnonymously, GoogleAuthProvider, signInWithPopup, onAuthStateChanged, signOut, createUserWithEmailAndPassword, signInWithEmailAndPassword } from "https://www.gstatic.com/firebasejs/11.6.1/firebase-auth.js";
+        import { getFirestore, doc, setDoc, getDoc, collection, onSnapshot, deleteDoc, query } from "https://www.gstatic.com/firebasejs/11.6.1/firebase-firestore.js";
+
+        // --- CONFIGURATION ---
+        let firebaseConfig = {
+            apiKey: "AIzaSyCqmrl6rW0JrptP0_iJksyRi9G7IBQ9sQo",
+            authDomain: "spaces-a4329.firebaseapp.com",
+            projectId: "spaces-a4329",
+            storageBucket: "spaces-a4329.firebasestorage.app",
+            messagingSenderId: "563251199066",
+            appId: "1:563251199066:web:6786a1e6b1b0298cd16c63",
+            measurementId: "G-TD3YV116CV"
+        };
+
+        if (typeof __firebase_config !== 'undefined') {
+            try { firebaseConfig = JSON.parse(__firebase_config); } catch(e) {}
+        }
+
+        const app = initializeApp(firebaseConfig);
+        const auth = getAuth(app);
+        const db = getFirestore(app);
+        const provider = new GoogleAuthProvider();
+        
+        // --- STATE ---
+        let state = {
+            user: null,
+            spaces: [],
+            activeSpaceId: null,
+            activeSpaceName: '',
+            windows: [], 
+            history: [], // For Undo functionality
+            activeWindowId: null,
+            settings: { compactMode: false, ghostMode: false, darkMode: false, autoHideTopBar: false, fullScreen: false },
+            view: 'home',
+            isSettingsOpen: false,
+            saveStatus: 'saved'
+        };
+
+        const appIdStr = typeof __app_id !== 'undefined' ? __app_id : 'study-os-v1';
+        let saveTimeout = null;
+        let windowsContainer = null;
+        let rightDock = null;
+
+        const mainInterface = document.getElementById('main-interface');
+        const loadingScreen = document.getElementById('loading');
+
+        // --- AUTH & INIT ---
+        onAuthStateChanged(auth, async (user) => {
+            state.user = user;
+            if (user) {
+                await initDataListeners();
+                render();
+                loadingScreen.classList.add('hidden');
+                mainInterface.classList.remove('hidden');
+            } else {
+                renderLoginScreen();
+                loadingScreen.classList.add('hidden');
+                mainInterface.classList.remove('hidden');
+            }
+        });
+
+        // --- HISTORY & UNDO SYSTEM ---
+        function saveToHistory() {
+            const snapshot = JSON.parse(JSON.stringify(state.windows));
+            state.history.push(snapshot);
+            if (state.history.length > 20) state.history.shift();
+        }
+
+        window.undo = () => {
+            if (state.history.length === 0) return;
+            const previousState = state.history.pop();
+            state.windows = previousState;
+            syncWindowsUI();
+            saveSpace();
+        };
+
+        // --- GLOBAL INPUT STATE ---
+        let isSpaceDown = false;
+        let isCtrlDown = false;
+
+        window.addEventListener('keydown', (e) => {
+            // Spacebar (Window Drag)
+            if (e.code === 'Space' && !e.repeat) {
+                if (e.target.tagName !== 'INPUT' && e.target.tagName !== 'TEXTAREA') {
+                    e.preventDefault();
+                    isSpaceDown = true;
+                    document.body.classList.add('space-pressed');
+                }
+            }
+            // Ctrl (Content Pan/Zoom)
+            if (e.key === 'Control' || e.key === 'Meta') {
+                isCtrlDown = true;
+                document.body.classList.add('ctrl-pressed');
+            }
+
+            // Undo Shortcut (Ctrl+Z)
+            if ((e.ctrlKey || e.metaKey) && e.key === 'z') {
+                if (e.target.tagName === 'INPUT' || e.target.tagName === 'TEXTAREA') return;
+                e.preventDefault();
+                window.undo();
+            }
+        });
+
+        window.addEventListener('keyup', (e) => {
+            if (e.code === 'Space') {
+                isSpaceDown = false;
+                document.body.classList.remove('space-pressed');
+            }
+            if (e.key === 'Control' || e.key === 'Meta') {
+                isCtrlDown = false;
+                document.body.classList.remove('ctrl-pressed');
+            }
+        });
+        
+        window.addEventListener('blur', () => { 
+            isSpaceDown = false; 
+            isCtrlDown = false;
+            document.body.classList.remove('space-pressed');
+            document.body.classList.remove('ctrl-pressed');
+        });
+
+        // --- PASTE LISTENER (Ctrl+V) ---
+        document.addEventListener('paste', (e) => {
+            if (state.view !== 'workspace') return;
+            const items = (e.clipboardData || e.originalEvent.clipboardData).items;
+            for (let index in items) {
+                const item = items[index];
+                if (item.kind === 'file') {
+                    const blob = item.getAsFile();
+                    const reader = new FileReader();
+                    reader.onload = (event) => {
+                        window.addWindow(blob.type.startsWith('image') ? 'image' : 'file', event.target.result, 'Pasted Content');
+                    };
+                    reader.readAsDataURL(blob);
+                } else if (item.kind === 'string' && item.type === 'text/plain') {
+                    if (document.activeElement.tagName !== 'INPUT' && document.activeElement.tagName !== 'TEXTAREA') {
+                        item.getAsString((s) => {
+                             window.addWindow('text', s, 'Pasted Note');
+                        });
+                    }
+                }
+            }
+        });
+
+        // --- CLICK OUTSIDE LISTENER ---
+        document.addEventListener('mousedown', (e) => {
+            const dropdown = document.getElementById('settings-dropdown');
+            const settingsBtn = document.getElementById('btn-settings');
+            if (state.isSettingsOpen && dropdown && !dropdown.contains(e.target) && settingsBtn && !settingsBtn.contains(e.target)) {
+                window.toggleSettings();
+            }
+        });
+
+        // --- FULL SCREEN LISTENER ---
+        document.addEventListener('fullscreenchange', () => {
+            state.settings.fullScreen = !!document.fullscreenElement;
+            const toggle = document.getElementById('toggle-fullScreen');
+            if(toggle) toggle.checked = state.settings.fullScreen;
+            const iconBtn = document.getElementById('btn-fullscreen');
+            if(iconBtn) {
+               iconBtn.innerHTML = `<i data-lucide="${state.settings.fullScreen ? 'minimize' : 'maximize'}" width="20"></i>`;
+               lucide.createIcons();
+            }
+        });
+
+        function renderLoginScreen() {
+            mainInterface.innerHTML = `
+                <div class="h-full w-full flex flex-col items-center justify-center bg-slate-50 dark:bg-slate-950 p-4 transition-colors duration-200">
+                    <div class="bg-white dark:bg-slate-800 p-8 rounded-2xl shadow-xl max-w-md w-full text-center border border-gray-100 dark:border-slate-700">
+                        <div class="w-16 h-16 bg-blue-600 rounded-2xl flex items-center justify-center text-white mx-auto mb-6 shadow-blue-200 dark:shadow-none shadow-lg">
+                            <i data-lucide="layout-grid" width="32" height="32"></i>
+                        </div>
+                        <h1 class="text-3xl font-bold text-gray-800 dark:text-white mb-2">StudySpace</h1>
+                        <p class="text-gray-500 dark:text-slate-400 mb-6">Your distraction-free, cloud-synced workspace.</p>
+                        
+                        <!-- Email/Password Login -->
+                        <div class="w-full mb-4">
+                            <input id="email" type="email" placeholder="Email" class="w-full mb-2 px-3 py-2 bg-gray-50 dark:bg-slate-900 border border-gray-300 dark:border-slate-600 rounded-lg text-sm outline-none focus:border-blue-500 text-gray-900 dark:text-white">
+                            <input id="password" type="password" placeholder="Password" class="w-full mb-3 px-3 py-2 bg-gray-50 dark:bg-slate-900 border border-gray-300 dark:border-slate-600 rounded-lg text-sm outline-none focus:border-blue-500 text-gray-900 dark:text-white">
+                            <div class="flex gap-2">
+                                <button id="btn-login" class="flex-1 py-2 bg-blue-600 hover:bg-blue-700 text-white rounded-lg text-sm font-medium transition-colors">Login</button>
+                                <button id="btn-signup" class="flex-1 py-2 bg-white dark:bg-slate-700 border border-gray-300 dark:border-slate-600 hover:bg-gray-50 dark:hover:bg-slate-600 text-gray-700 dark:text-white rounded-lg text-sm font-medium transition-colors">Sign Up</button>
+                            </div>
+                        </div>
+
+                        <div class="relative flex py-2 items-center mb-4">
+                            <div class="flex-grow border-t border-gray-300 dark:border-slate-700"></div>
+                            <span class="flex-shrink-0 mx-4 text-gray-400 text-xs">OR</span>
+                            <div class="flex-grow border-t border-gray-300 dark:border-slate-700"></div>
+                        </div>
+
+                        <button id="btn-google" class="w-full py-2.5 px-4 bg-white dark:bg-slate-700 border border-gray-300 dark:border-slate-600 hover:bg-gray-50 dark:hover:bg-slate-600 text-gray-700 dark:text-white rounded-xl font-medium transition-all flex items-center justify-center gap-3 mb-3 text-sm">
+                            <img src="https://www.gstatic.com/firebasejs/ui/2.0.0/images/auth/google.svg" class="w-4 h-4" alt="Google">
+                            Continue with Google
+                        </button>
+                        <button id="btn-anon" class="w-full py-2.5 px-4 bg-gray-800 hover:bg-gray-900 dark:bg-slate-900 dark:hover:bg-black text-white rounded-xl font-medium transition-all flex items-center justify-center gap-2 text-sm">
+                            <i data-lucide="user" width="16"></i>
+                            Continue as Guest
+                        </button>
+                        <div id="login-error" class="hidden mt-4 p-3 bg-red-50 dark:bg-red-900/30 text-red-600 dark:text-red-400 text-sm rounded-lg border border-red-100 dark:border-red-800 text-left"></div>
+                    </div>
+                </div>
+            `;
+            lucide.createIcons();
+
+            const showError = (msg) => {
+                const el = document.getElementById('login-error');
+                el.innerHTML = `<strong>Failed:</strong> ${msg}`;
+                el.classList.remove('hidden');
+            };
+
+            const getCreds = () => ({
+                email: document.getElementById('email').value,
+                pass: document.getElementById('password').value
+            });
+
+            document.getElementById('btn-login').onclick = () => {
+                const {email, pass} = getCreds();
+                if(!email || !pass) return showError("Please enter email and password");
+                signInWithEmailAndPassword(auth, email, pass).catch(e => showError(e.message));
+            };
+
+            document.getElementById('btn-signup').onclick = () => {
+                const {email, pass} = getCreds();
+                if(!email || !pass) return showError("Please enter email and password");
+                createUserWithEmailAndPassword(auth, email, pass).catch(e => showError(e.message));
+            };
+
+            document.getElementById('btn-google').onclick = () => {
+                signInWithPopup(auth, provider).catch(error => {
+                    if (error.code === 'auth/unauthorized-domain') showError(`Domain not authorized. Add <code>${window.location.hostname}</code> to Firebase.`);
+                    else if (error.code === 'auth/popup-closed-by-user') showError("Sign-in popup was closed.");
+                    else showError(error.message);
+                });
+            };
+
+            document.getElementById('btn-anon').onclick = () => {
+                signInAnonymously(auth).catch(error => {
+                    if (error.code === 'auth/admin-restricted-operation') showError("Anonymous login is disabled in Firebase.");
+                    else showError(error.message);
+                });
+            };
+        }
+
+        async function initDataListeners() {
+            const spacesQuery = query(collection(db, 'artifacts', appIdStr, 'users', state.user.uid, 'spaces'));
+            onSnapshot(spacesQuery, (snapshot) => {
+                const fetchedSpaces = snapshot.docs.map(doc => ({ id: doc.id, ...doc.data() }));
+                fetchedSpaces.sort((a, b) => new Date(b.lastModified) - new Date(a.lastModified));
+                state.spaces = fetchedSpaces;
+                if (state.view === 'home') renderHome();
+            });
+
+            const settingsRef = doc(db, 'artifacts', appIdStr, 'users', state.user.uid, 'settings', 'global');
+            getDoc(settingsRef).then(snap => {
+                if (snap.exists()) {
+                    state.settings = { ...state.settings, ...snap.data() };
+                    applySettings();
+                }
+            });
+        }
+
+        function applySettings() {
+            if (state.settings.darkMode) document.documentElement.classList.add('dark');
+            else document.documentElement.classList.remove('dark');
+
+            if (state.settings.ghostMode) document.body.classList.add('ghost-mode');
+            else document.body.classList.remove('ghost-mode');
+
+            if (state.settings.autoHideTopBar) document.body.classList.add('auto-hide-bar');
+            else document.body.classList.remove('auto-hide-bar');
+
+            if (state.settings.fullScreen) {
+               if (!document.fullscreenElement) document.documentElement.requestFullscreen().catch(e => {});
+            } else {
+               if (document.fullscreenElement) document.exitFullscreen().catch(e => {});
+            }
+            
+            if (state.view === 'workspace' && state.isSettingsOpen) {
+                ['ghostMode', 'darkMode', 'autoHideTopBar', 'fullScreen'].forEach(key => {
+                    const el = document.getElementById(`toggle-${key}`);
+                    if(el) el.checked = state.settings[key];
+                });
+            }
+        }
+
+        // --- RENDER ---
+
+        function render() {
+            if (!state.user) return;
+            if (state.view === 'home') renderHome();
+            else renderWorkspace();
+        }
+
+        function renderHome() {
+            const spacesHtml = state.spaces.map(space => `
+                <div onclick="window.openSpace('${space.id}')" class="group relative flex flex-col bg-white dark:bg-slate-800 border border-gray-200 dark:border-slate-700 rounded-xl p-5 hover:shadow-lg hover:border-blue-300 dark:hover:border-blue-500 transition-all cursor-pointer h-48">
+                    <div class="flex items-start justify-between mb-2">
+                        <div class="w-10 h-10 bg-blue-50 dark:bg-slate-700 text-blue-600 dark:text-blue-400 rounded-lg flex items-center justify-center">
+                            <i data-lucide="layout-grid" width="20"></i>
+                        </div>
+                        <button onclick="event.stopPropagation(); window.deleteSpace('${space.id}')" class="p-1.5 text-gray-400 hover:bg-red-50 hover:text-red-500 dark:hover:bg-red-900/30 rounded-md transition-colors opacity-0 group-hover:opacity-100">
+                            <i data-lucide="trash-2" width="16"></i>
+                        </button>
+                    </div>
+                    <h3 class="font-semibold text-gray-800 dark:text-slate-100 text-lg mb-1 truncate">${space.name}</h3>
+                    <div class="mt-auto pt-4 border-t border-gray-50 dark:border-slate-700 flex flex-col gap-1.5">
+                        <div class="flex items-center text-xs text-gray-500 dark:text-slate-400">
+                            <i data-lucide="clock" width="12" class="mr-1.5"></i>
+                            ${new Date(space.lastModified).toLocaleDateString()}
+                        </div>
+                        <div class="text-xs text-gray-500 dark:text-slate-400 font-medium">
+                            ${space.windows ? space.windows.length : 0} items
+                        </div>
+                    </div>
+                </div>
+            `).join('');
+
+            mainInterface.innerHTML = `
+                <div class="min-h-screen bg-slate-50 dark:bg-slate-950 font-sans p-8 overflow-auto transition-colors duration-200">
+                    <div class="max-w-6xl mx-auto">
+                        <div class="flex items-center justify-between mb-8">
+                            <div class="flex items-center gap-3">
+                                <div class="w-10 h-10 bg-blue-600 rounded-xl flex items-center justify-center text-white shadow-blue-200 dark:shadow-none shadow-lg">
+                                    <i data-lucide="home" width="20"></i>
+                                </div>
+                                <div>
+                                    <h1 class="text-2xl font-bold text-gray-800 dark:text-white">StudySpace</h1>
+                                    <div class="flex items-center gap-2 text-gray-500 dark:text-slate-400 text-sm">
+                                        <span>${state.user.isAnonymous ? 'Guest User' : state.user.displayName || state.user.email}</span>
+                                        <button onclick="window.handleSignOut()" class="text-blue-600 dark:text-blue-400 hover:underline text-xs">(Sign Out)</button>
+                                    </div>
+                                </div>
+                            </div>
+                        </div>
+                        <div class="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-3 xl:grid-cols-4 gap-6">
+                            <button onclick="window.createSpace()" class="flex flex-col items-center justify-center h-48 rounded-xl border-2 border-dashed border-gray-300 dark:border-slate-700 hover:border-blue-500 dark:hover:border-blue-500 hover:bg-blue-50 dark:hover:bg-slate-800/50 transition-all group">
+                                <div class="w-12 h-12 rounded-full bg-gray-100 dark:bg-slate-800 group-hover:bg-blue-100 dark:group-hover:bg-slate-700 text-gray-400 group-hover:text-blue-600 dark:group-hover:text-blue-400 flex items-center justify-center mb-3 transition-colors">
+                                    <i data-lucide="plus" width="24"></i>
+                                </div>
+                                <span class="font-medium text-gray-600 dark:text-slate-300 group-hover:text-blue-700 dark:group-hover:text-blue-300">Create New Space</span>
+                            </button>
+                            
+                            <!-- Import Button -->
+                            <button onclick="window.triggerImport()" class="flex flex-col items-center justify-center h-48 rounded-xl border-2 border-dashed border-gray-300 dark:border-slate-700 hover:border-green-500 dark:hover:border-green-500 hover:bg-green-50 dark:hover:bg-green-900/20 transition-all group">
+                                <div class="w-12 h-12 rounded-full bg-gray-100 dark:bg-slate-800 group-hover:bg-green-100 dark:group-hover:bg-green-900 text-gray-400 group-hover:text-green-600 dark:group-hover:text-green-400 flex items-center justify-center mb-3 transition-colors">
+                                    <i data-lucide="upload" width="24"></i>
+                                </div>
+                                <span class="font-medium text-gray-600 dark:text-slate-300 group-hover:text-green-700 dark:group-hover:text-green-300">Import Space (JSON)</span>
+                            </button>
+                            <input type="file" id="import-file-input" class="hidden" accept=".json" onchange="window.handleImportFile(event)">
+
+                            ${spacesHtml}
+                        </div>
+                    </div>
+                </div>
+            `;
+            lucide.createIcons();
+        }
+
+        function renderWorkspace() {
+            mainInterface.innerHTML = `
+                <div class="h-screen w-screen bg-slate-100 dark:bg-slate-950 flex flex-col overflow-hidden font-sans transition-colors duration-200" ondrop="window.handleDrop(event)" ondragover="event.preventDefault()">
+                    
+                    <div id="top-bar-trigger"></div>
+
+                    <div id="top-bar-container" class="absolute top-0 left-0 w-full z-50">
+                        <div class="h-16 bg-white dark:bg-slate-900 border-b border-gray-200 dark:border-slate-800 shadow-sm flex items-center px-4 justify-between transition-colors duration-200">
+                            <div class="flex items-center gap-3 w-1/4">
+                                <button onclick="window.goHome()" class="p-2 hover:bg-gray-100 dark:hover:bg-slate-800 rounded-full text-gray-600 dark:text-slate-300 transition-colors">
+                                    <i data-lucide="arrow-left" width="20"></i>
+                                </button>
+                                <input value="${state.activeSpaceName}" onchange="window.updateSpaceName(this.value)" class="font-semibold text-gray-700 dark:text-slate-200 bg-transparent hover:bg-gray-100 dark:hover:bg-slate-800 focus:bg-white dark:focus:bg-slate-950 focus:ring-2 focus:ring-blue-500 rounded px-2 py-1 outline-none transition-all w-full max-w-[200px]" />
+                            </div>
+
+                            <div class="flex items-center gap-4 flex-1 justify-center max-w-2xl">
+                                <button onclick="window.addWindow('text', '')" class="flex items-center gap-2 px-3 py-2 bg-gray-100 dark:bg-slate-800 hover:bg-gray-200 dark:hover:bg-slate-700 text-gray-700 dark:text-slate-200 rounded-md text-sm transition-colors border border-transparent dark:border-slate-700">
+                                    <i data-lucide="plus" width="16"></i> Note
+                                </button>
+                                <form onsubmit="window.handleUrlSubmit(event)" class="flex-1 flex gap-2">
+                                    <input id="urlInput" type="text" placeholder="Paste Drive Link..." class="w-full px-4 py-2 bg-gray-100 dark:bg-slate-800 border-transparent dark:border-slate-700 focus:bg-white dark:focus:bg-slate-900 focus:border-blue-500 border rounded-md text-sm outline-none text-slate-800 dark:text-slate-200" />
+                                    <button type="submit" class="px-4 py-2 bg-blue-600 hover:bg-blue-700 text-white text-sm font-medium rounded-md transition-colors">Open</button>
+                                </form>
+                            </div>
+
+                            <div class="flex items-center justify-end gap-3 w-1/4">
+                                <div id="save-status" class="text-xs mr-2 text-gray-400 dark:text-slate-500">Saved</div>
+                                <button id="btn-fullscreen" onclick="window.toggleFullScreen()" class="p-2 hover:bg-gray-100 dark:hover:bg-slate-800 rounded-full text-gray-600 dark:text-slate-300 transition-colors" title="Toggle Full Screen">
+                                    <i data-lucide="${state.settings.fullScreen ? 'minimize' : 'maximize'}" width="20"></i>
+                                </button>
+                                <button id="btn-settings" onclick="window.toggleSettings()" class="p-2 hover:bg-gray-100 dark:hover:bg-slate-800 rounded-full text-gray-600 dark:text-slate-300 transition-colors" title="Settings">
+                                    <i data-lucide="settings" width="20"></i>
+                                </button>
+                            </div>
+                        </div>
+                        
+                        <div id="settings-dropdown" class="hidden absolute right-4 top-16 w-72 bg-white dark:bg-slate-800 rounded-lg shadow-xl border border-gray-200 dark:border-slate-700 p-4 z-[60]">
+                             <h3 class="font-semibold text-gray-800 dark:text-slate-100 mb-3 text-sm border-b pb-2 dark:border-slate-700">Settings</h3>
+                             ${renderToggle('darkMode', 'Dark Mode', 'Easy on the eyes')}
+                             ${renderToggle('ghostMode', 'Ghost Mode', 'Transparent when inactive')}
+                             ${renderToggle('autoHideTopBar', 'Auto-Hide Bar', 'Hover top edge to show')}
+                             ${renderToggle('fullScreen', 'Full Screen', 'Immersive mode')}
+                             
+                             <button onclick="window.downloadZip()" class="w-full flex items-center gap-2 text-sm text-gray-700 dark:text-slate-200 hover:bg-gray-50 dark:hover:bg-slate-700 p-2 rounded transition-colors border-t border-gray-100 dark:border-slate-700 mt-2">
+                                 <i data-lucide="download" width="16"></i> Download Files (ZIP)
+                             </button>
+                             
+                             <button onclick="window.exportSpace()" class="w-full flex items-center gap-2 text-sm text-gray-700 dark:text-slate-200 hover:bg-gray-50 dark:hover:bg-slate-700 p-2 rounded transition-colors mt-1">
+                                 <i data-lucide="share" width="16"></i> Export Space (JSON)
+                             </button>
+                        </div>
+                    </div>
+
+                    <div id="right-dock"></div>
+
+                    <!-- Canvas Background Click Handler to clear active window -->
+                    <div id="windows-container" onclick="window.clearActiveWindow(event)" class="flex-1 relative overflow-hidden bg-slate-50 dark:bg-slate-950 bg-grid-light transition-colors duration-200 pt-16">
+                    </div>
+                </div>
+            `;
+            windowsContainer = document.getElementById('windows-container');
+            rightDock = document.getElementById('right-dock');
+            lucide.createIcons();
+            syncWindowsUI();
+            applySettings();
+        }
+
+        function renderToggle(key, label, sub) {
+            return `
+             <div class="flex items-center justify-between mb-4">
+                <div>
+                    <label class="block text-sm font-medium text-gray-700 dark:text-slate-200">${label}</label>
+                    <p class="text-xs text-gray-500 dark:text-slate-400">${sub}</p>
+                </div>
+                <label class="relative inline-flex items-center cursor-pointer">
+                    <input id="toggle-${key}" type="checkbox" class="sr-only peer" ${state.settings[key] ? 'checked' : ''} onchange="window.toggleSetting('${key}', this.checked)">
+                    <div class="w-11 h-6 bg-gray-200 dark:bg-slate-600 peer-focus:outline-none peer-focus:ring-4 peer-focus:ring-blue-300 dark:peer-focus:ring-blue-800 rounded-full peer peer-checked:after:translate-x-full peer-checked:after:border-white after:content-[''] after:absolute after:top-[2px] after:left-[2px] after:bg-white after:border-gray-300 after:border after:rounded-full after:h-5 after:w-5 after:transition-all peer-checked:bg-blue-600"></div>
+                </label>
+             </div>
+            `;
+        }
+
+        function syncWindowsUI() {
+            if (!windowsContainer || !rightDock) return;
+            
+            [...windowsContainer.children].forEach(el => {
+                const id = el.id.replace('win-', '');
+                if (!state.windows.find(w => w.id === id && !w.isMinimized)) el.remove();
+            });
+            [...rightDock.children].forEach(el => {
+                const id = el.id.replace('dock-', '');
+                if (!state.windows.find(w => w.id === id && w.isMinimized)) el.remove();
+            });
+
+            state.windows.forEach(win => {
+                if (win.isMinimized) {
+                    if (!document.getElementById(`dock-${win.id}`)) {
+                        const dockEl = document.createElement('div');
+                        dockEl.id = `dock-${win.id}`;
+                        dockEl.className = 'dock-item w-10 h-10 rounded-full flex items-center justify-center cursor-pointer relative group';
+                        dockEl.onclick = () => window.restoreWindow(win.id);
+                        
+                        let icon = 'file';
+                        if (win.type === 'image') icon = 'image';
+                        else if (win.type === 'drive') icon = 'link';
+                        else if (win.type === 'pdf') icon = 'file-text';
+
+                        dockEl.innerHTML = `
+                            <i data-lucide="${icon}" class="text-gray-600 dark:text-gray-300" width="20"></i>
+                            <div class="dock-item-label absolute right-12 bg-gray-800 text-white text-xs px-2 py-1 rounded shadow-lg">
+                                ${win.title || 'Window'}
+                            </div>
+                        `;
+                        rightDock.appendChild(dockEl);
+                        lucide.createIcons();
+                    }
+                } else {
+                    let el = document.getElementById(`win-${win.id}`);
+                    const isMaximized = win.isMaximized;
+                    const transform = isMaximized ? 'translate(0px, 0px)' : `translate(${win.x}px, ${win.y}px)`;
+                    const width = isMaximized ? '100%' : `${win.width}px`;
+                    const height = isMaximized ? '100%' : `${win.height}px`;
+                    const zIndex = win.zIndex || 10;
+                    // Add 'window-active' class if this window is currently active
+                    const isActive = state.activeWindowId === win.id;
+                    const activeClass = isActive ? 'window-active' : '';
+                    const borderClass = isActive ? 'ring-2 ring-blue-400/50 shadow-blue-900/10 dark:shadow-black/50' : '';
+
+                    if (!el) {
+                        el = document.createElement('div');
+                        el.id = `win-${win.id}`;
+                        el.style.position = 'absolute';
+                        el.onmousedown = (e) => {
+                            window.focusWindow(win.id);
+                            // Space + Drag support from anywhere in window
+                            if (isSpaceDown) {
+                                e.preventDefault(); 
+                                window.startDrag(e, win.id);
+                            }
+                            // Ctrl + Drag to pan content
+                            if (isCtrlDown) {
+                                e.preventDefault();
+                                window.startPan(e, win.id);
+                            }
+                        };
+                        
+                        // Wheel support for Zoom (Scale/Font size)
+                        el.addEventListener('wheel', (e) => {
+                            if (isCtrlDown) {
+                                e.preventDefault();
+                                window.handleZoom(e, win.id);
+                            }
+                        });
+                        
+                        let contentHtml = '';
+                        if (win.type === 'text') {
+                            contentHtml = `<textarea style="font-size: ${win.zoom || 14}px;" class="w-full h-full p-4 resize-none outline-none text-gray-700 dark:text-slate-200 dark:bg-slate-800 font-mono text-sm" oninput="window.updateWindowContent('${win.id}', this.value)">${win.content}</textarea>`;
+                        } else if (win.type === 'image') {
+                            contentHtml = `<div class="w-full h-full flex items-center justify-center bg-gray-50 dark:bg-slate-900 overflow-auto window-scroll-area">
+                                <img src="${win.content}" style="transform: scale(${win.zoom || 1}); transform-origin: center;" class="max-w-none transition-transform duration-75">
+                            </div>`;
+                        } else {
+                            contentHtml = `<div class="w-full h-full overflow-auto window-scroll-area bg-white dark:bg-slate-900 relative">
+                                <iframe src="${win.content}" style="width: ${win.zoom ? win.zoom * 100 : 100}%; height: ${win.zoom ? win.zoom * 100 : 100}%; transform-origin: top left;" class="border-none"></iframe>
+                            </div>`;
+                        }
+
+                        el.innerHTML = `
+                            <div class="h-10 bg-gray-100 dark:bg-slate-900 border-b border-gray-200 dark:border-slate-700 flex items-center justify-between px-3 cursor-grab select-none window-header" onmousedown="window.startDrag(event, '${win.id}')">
+                                <div class="flex items-center gap-2 text-gray-600 dark:text-slate-300 text-sm font-medium overflow-hidden">
+                                    <input type="text" value="${win.title || 'Untitled'}" 
+                                           class="bg-transparent border-none outline-none text-gray-600 dark:text-slate-300 text-sm font-medium w-[150px] truncate focus:ring-1 focus:ring-blue-500 rounded px-1"
+                                           onchange="window.renameWindow('${win.id}', this.value)"
+                                           onmousedown="event.stopPropagation()" 
+                                           onclick="event.stopPropagation()">
+                                </div>
+                                <div class="flex items-center gap-1.5 window-controls">
+                                    <button onclick="window.downloadFile('${win.id}')" class="p-1 hover:bg-gray-200 dark:hover:bg-slate-700 rounded text-gray-500 dark:text-slate-400"><i data-lucide="download" width="14"></i></button>
+                                    <button onclick="window.toggleMaximize('${win.id}')" class="p-1 hover:bg-gray-200 dark:hover:bg-slate-700 rounded text-gray-500 dark:text-slate-400"><i data-lucide="${isMaximized ? 'minimize-2' : 'maximize-2'}" width="14"></i></button>
+                                    <button onclick="window.closeWindow('${win.id}')" class="p-1 hover:bg-red-100 dark:hover:bg-red-900/30 hover:text-red-500 dark:hover:text-red-400 rounded text-gray-400 dark:text-slate-500"><i data-lucide="x" width="14"></i></button>
+                                </div>
+                            </div>
+                            <div class="flex-1 bg-white dark:bg-slate-800 relative overflow-hidden window-content">
+                                ${contentHtml}
+                                <div class="absolute inset-0 z-50 bg-transparent hidden drag-overlay"></div>
+                            </div>
+                            <div class="absolute bottom-0 right-0 w-4 h-4 cursor-se-resize flex items-center justify-center resize-handle z-50" onmousedown="window.startResize(event, '${win.id}')">
+                                <div class="w-0 h-0 border-solid border-b-[8px] border-r-[8px] border-l-transparent border-t-transparent border-b-gray-400 dark:border-b-slate-500 border-r-gray-400 dark:border-r-slate-500 opacity-50 hover:opacity-100"></div>
+                            </div>
+                        `;
+                        windowsContainer.appendChild(el);
+                        lucide.createIcons();
+                    }
+
+                    // Always update styles
+                    el.style.transform = transform;
+                    el.style.width = width;
+                    el.style.height = height;
+                    el.style.zIndex = zIndex;
+                    el.className = `window absolute flex flex-col bg-white dark:bg-slate-800 rounded-lg shadow-2xl border border-gray-200 dark:border-slate-700 overflow-hidden ${borderClass} ${activeClass} ${isMaximized ? 'maximizing' : ''}`;
+
+                    // Always update Zoom Content
+                    if (win.type === 'text') {
+                        const ta = el.querySelector('textarea');
+                        if (ta) ta.style.fontSize = `${win.zoom || 14}px`;
+                    } else if (win.type === 'image') {
+                        const img = el.querySelector('img');
+                        if (img) img.style.transform = `scale(${win.zoom || 1})`;
+                    } else {
+                        const iframe = el.querySelector('iframe');
+                        if (iframe) {
+                            iframe.style.width = `${(win.zoom || 1) * 100}%`;
+                            iframe.style.height = `${(win.zoom || 1) * 100}%`;
+                        }
+                    }
+                }
+            });
+        }
+
+        window.handleSignOut = () => signOut(auth).then(() => window.location.reload());
+        window.createSpace = async () => {
+            const id = Math.random().toString(36).substr(2, 9);
+            const newSpace = { name: 'Untitled Space', created: new Date().toISOString(), lastModified: new Date().toISOString(), windows: [] };
+            await setDoc(doc(db, 'artifacts', appIdStr, 'users', state.user.uid, 'spaces', id), newSpace);
+        };
+        window.deleteSpace = async (id) => { if (confirm('Delete this space?')) await deleteDoc(doc(db, 'artifacts', appIdStr, 'users', state.user.uid, 'spaces', id)); };
+        window.openSpace = (id) => {
+            const space = state.spaces.find(s => s.id === id);
+            if (!space) return;
+            state.activeSpaceId = id;
+            state.activeSpaceName = space.name;
+            state.windows = space.windows || [];
+            state.view = 'workspace';
+            renderWorkspace();
+        };
+        window.goHome = () => { state.view = 'home'; state.activeSpaceId = null; renderHome(); };
+        window.updateSpaceName = (name) => { state.activeSpaceName = name; saveSpace(); };
+        window.toggleSettings = () => {
+            const el = document.getElementById('settings-dropdown');
+            el.classList.toggle('hidden');
+            state.isSettingsOpen = !el.classList.contains('hidden');
+            document.getElementById('top-bar-container').classList.toggle('menu-open', state.isSettingsOpen);
+        };
+
+        window.toggleSetting = (key, enabled) => {
+            state.settings[key] = enabled;
+            if(key === 'fullScreen') window.toggleFullScreen(enabled);
+            else applySettings();
+            setDoc(doc(db, 'artifacts', appIdStr, 'users', state.user.uid, 'settings', 'global'), state.settings);
+        };
+
+        window.toggleFullScreen = (forceState) => {
+            const newState = (forceState === undefined) ? !document.fullscreenElement : forceState;
+            state.settings.fullScreen = newState;
+            if (newState && !document.fullscreenElement) document.documentElement.requestFullscreen().catch(() => {});
+            else if (!newState && document.fullscreenElement) document.exitFullscreen().catch(() => {});
+            applySettings();
+        };
+
+        window.addWindow = (type, content, title = 'New Window') => {
+            saveToHistory();
+            const id = Math.random().toString(36).substr(2, 9);
+            state.windows.push({ id, type, title, content, x: 50 + (state.windows.length * 30 % 200), y: 80 + (state.windows.length * 30 % 200), width: 500, height: 400, zIndex: 10 + state.windows.length, isMinimized: false, zoom: 1 });
+            state.activeWindowId = id;
+            syncWindowsUI(); saveSpace();
+        };
+        window.closeWindow = (id) => { saveToHistory(); state.windows = state.windows.filter(w => w.id !== id); syncWindowsUI(); saveSpace(); };
+        window.restoreWindow = (id) => { 
+            saveToHistory();
+            const w = state.windows.find(w => w.id === id); 
+            if(w) { w.isMinimized = false; w.x = Math.min(w.x, window.innerWidth - 100); syncWindowsUI(); saveSpace(); } 
+        };
+        window.updateWindowContent = (id, val) => { const w = state.windows.find(w => w.id === id); if(w) { w.content = val; saveSpace(); } };
+        window.renameWindow = (id, newTitle) => {
+            const w = state.windows.find(w => w.id === id);
+            if(w) {
+                w.title = newTitle;
+                saveSpace();
+            }
+        };
+        
+        // --- IMPROVED Z-INDEX LOGIC ---
+        window.focusWindow = (id) => { 
+            state.activeWindowId = id; 
+            const maxZ = Math.max(...state.windows.map(w => w.zIndex || 10), 10);
+            const win = state.windows.find(w => w.id === id);
+            if(win && win.zIndex !== maxZ) {
+                win.zIndex = maxZ + 1;
+                // We don't save immediately on every click to avoid write spam, 
+                // relying on syncWindowsUI to render and periodic saves or other triggers
+            }
+            syncWindowsUI(); 
+        };
+
+        // --- NEW: Clear Active Window on Background Click ---
+        window.clearActiveWindow = (e) => {
+            // Only clear if we clicked the background container itself
+            if(e.target.id === 'windows-container') {
+                state.activeWindowId = null;
+                syncWindowsUI();
+            }
+        };
+        
+        window.toggleMaximize = (id) => { const w = state.windows.find(w => w.id === id); if(w) { w.isMaximized = !w.isMaximized; syncWindowsUI(); } };
+        
+        window.handleUrlSubmit = (e) => {
+            e.preventDefault();
+            const input = document.getElementById('urlInput');
+            let url = input.value.trim();
+            if (!url) return;
+            if (url.includes('drive.google.com')) url = url.replace(/\/view.*$/, '/preview').replace(/\/edit.*$/, '/preview');
+            window.addWindow('drive', url, 'Web Link');
+            input.value = '';
+        };
+
+        let dragTarget = null, dragStart = {};
+        let isResizing = false;
+        let isPanning = false;
+
+        window.startDrag = (e, id) => {
+            if (e.target.closest('button')) return;
+            if (e.ctrlKey) return; // Prevent window drag if Ctrl is held (User wants interaction)
+
+            const win = state.windows.find(w => w.id === id);
+            if (win.isMaximized) return;
+            saveToHistory();
+            dragTarget = win; isResizing = false; isPanning = false;
+            dragStart = { x: e.clientX, y: e.clientY, winX: win.x, winY: win.y };
+            document.querySelectorAll('.drag-overlay').forEach(el => el.classList.remove('hidden'));
+            document.addEventListener('mousemove', handleGlobalMouseMove);
+            document.addEventListener('mouseup', handleGlobalMouseUp);
+        };
+
+        window.startResize = (e, id) => {
+            e.stopPropagation();
+            if (e.ctrlKey) return; 
+
+            const win = state.windows.find(w => w.id === id);
+            saveToHistory();
+            dragTarget = win; isResizing = true; isPanning = false;
+            dragStart = { x: e.clientX, y: e.clientY, w: win.width, h: win.height };
+            document.querySelectorAll('.drag-overlay').forEach(el => el.classList.remove('hidden'));
+            document.addEventListener('mousemove', handleGlobalMouseMove);
+            document.addEventListener('mouseup', handleGlobalMouseUp);
+        };
+
+        window.startPan = (e, id) => {
+            const win = state.windows.find(w => w.id === id);
+            dragTarget = win; isResizing = false; isPanning = true;
+            document.body.classList.add('panning');
+            
+            // Get current scroll position
+            const container = document.querySelector(`#win-${id} .window-scroll-area`) || document.querySelector(`#win-${id} .window-content`);
+            dragStart = { 
+                x: e.clientX, 
+                y: e.clientY, 
+                scrollX: container ? container.scrollLeft : 0, 
+                scrollY: container ? container.scrollTop : 0 
+            };
+            
+            document.addEventListener('mousemove', handleGlobalMouseMove);
+            document.addEventListener('mouseup', handleGlobalMouseUp);
+        };
+
+        window.handleZoom = (e, id) => {
+            const win = state.windows.find(w => w.id === id);
+            if (!win) return;
+            
+            const delta = e.deltaY > 0 ? -0.1 : 0.1;
+            
+            if (win.type === 'text') {
+                let size = win.zoom || 14;
+                size = Math.max(8, Math.min(72, size + (e.deltaY > 0 ? -2 : 2)));
+                win.zoom = size;
+            } else {
+                let scale = win.zoom || 1;
+                scale = Math.max(0.1, Math.min(5, scale + delta));
+                win.zoom = parseFloat(scale.toFixed(2));
+            }
+            
+            // For now force re-render to apply zoom style
+            syncWindowsUI();
+            
+            // Debounce save
+            if(saveTimeout) clearTimeout(saveTimeout);
+            saveTimeout = setTimeout(saveSpace, 1000);
+        };
+
+        function handleGlobalMouseMove(e) {
+            if (!dragTarget) return;
+            const dx = e.clientX - dragStart.x;
+            const dy = e.clientY - dragStart.y;
+            
+            if (isPanning) {
+                const el = document.getElementById(`win-${dragTarget.id}`);
+                const container = el.querySelector('.window-scroll-area') || el.querySelector('.window-content');
+                if (container) {
+                    container.scrollLeft = dragStart.scrollX - dx;
+                    container.scrollTop = dragStart.scrollY - dy;
+                }
+                return;
+            }
+
+            if (isResizing) {
+                dragTarget.width = Math.max(200, dragStart.w + dx);
+                dragTarget.height = Math.max(150, dragStart.h + dy);
+            } else {
+                dragTarget.x = dragStart.winX + dx;
+                dragTarget.y = dragStart.winY + dy;
+            }
+            const el = document.getElementById(`win-${dragTarget.id}`);
+            if (el) {
+                if(isResizing) { el.style.width = `${dragTarget.width}px`; el.style.height = `${dragTarget.height}px`; }
+                else { el.style.transform = `translate(${dragTarget.x}px, ${dragTarget.y}px)`; }
+            }
+        }
+
+        function handleGlobalMouseUp(e) {
+            document.removeEventListener('mousemove', handleGlobalMouseMove);
+            document.removeEventListener('mouseup', handleGlobalMouseUp);
+            document.querySelectorAll('.drag-overlay').forEach(el => el.classList.add('hidden'));
+            document.body.classList.remove('panning');
+            
+            if (dragTarget) {
+                if (!isResizing && !isPanning && e.clientX >= window.innerWidth - 30) {
+                    dragTarget.isMinimized = true;
+                    syncWindowsUI();
+                }
+                if (!isPanning) saveSpace(); // Don't save on every pan, scroll pos isn't persisted yet
+                dragTarget = null;
+            }
+        }
+
+        window.handleDrop = (e) => { e.preventDefault(); Array.from(e.dataTransfer.files).forEach(file => { if (file.size > 800*1024) return alert('File too large'); const r = new FileReader(); r.onload = (evt) => window.addWindow(file.type.startsWith('image/')?'image':file.type==='application/pdf'?'pdf':'text', evt.target.result, file.name); if(file.type.startsWith('text/')) r.readAsText(file); else r.readAsDataURL(file); }); };
+        window.downloadFile = (id) => { const w = state.windows.find(w => w.id === id); if(!w) return; const a = document.createElement('a'); a.href = w.type==='text'?URL.createObjectURL(new Blob([w.content],{type:'text/plain'})):w.content; a.download = w.title||'dl'; a.click(); };
+        window.downloadZip = async () => { if (!window.JSZip) return alert('Loading lib...'); const zip = new JSZip(), f = zip.folder(state.activeSpaceName); state.windows.forEach(w => { const n = (w.title||'u').replace(/\W/g,'_'); if(w.type==='text') f.file(n+'.txt', w.content); else if(w.content.startsWith('data:')) f.file(n+'.png', w.content.split(',')[1], {base64:true}); else f.file('links.txt', `${w.title}: ${w.content}\n`, {append:true}); }); const c = await zip.generateAsync({type:"blob"}); const a=document.createElement('a'); a.href=URL.createObjectURL(c); a.download=`${state.activeSpaceName}.zip`; a.click(); };
+        
+        // --- EXPORT SPACE (JSON) ---
+        window.exportSpace = () => {
+            const data = {
+                name: state.activeSpaceName,
+                windows: state.windows,
+                exportedAt: new Date().toISOString()
+            };
+            const blob = new Blob([JSON.stringify(data, null, 2)], {type: 'application/json'});
+            const a = document.createElement('a');
+            a.href = URL.createObjectURL(blob);
+            a.download = `${state.activeSpaceName.replace(/[^a-z0-9]/gi, '_') || 'space'}.json`;
+            a.click();
+        };
+
+        // --- IMPORT SPACE (JSON) ---
+        window.triggerImport = () => document.getElementById('import-file-input').click();
+
+        window.handleImportFile = (e) => {
+            const file = e.target.files[0];
+            if (!file) return;
+            
+            const reader = new FileReader();
+            reader.onload = async (evt) => {
+                try {
+                    const data = JSON.parse(evt.target.result);
+                    // Basic validation
+                    if (!Array.isArray(data.windows)) throw new Error("Invalid space file format");
+                    
+                    const newId = Math.random().toString(36).substr(2, 9);
+                    const newSpace = {
+                        name: (data.name || 'Imported Space') + ' (Copy)',
+                        created: new Date().toISOString(),
+                        lastModified: new Date().toISOString(),
+                        windows: data.windows
+                    };
+                    
+                    await setDoc(doc(db, 'artifacts', appIdStr, 'users', state.user.uid, 'spaces', newId), newSpace);
+                    alert('Space imported successfully!');
+                } catch (err) {
+                    console.error(err);
+                    alert('Failed to import space: ' + err.message);
+                }
+            };
+            reader.readAsText(file);
+            e.target.value = ''; // Reset input
+        };
+
+        function saveSpace() {
+            const sEl = document.getElementById('save-status'); if(sEl) sEl.innerText = "Saving...";
+            if (saveTimeout) clearTimeout(saveTimeout);
+            saveTimeout = setTimeout(async () => {
+                if (state.activeSpaceId && state.user) {
+                    try { await setDoc(doc(db, 'artifacts', appIdStr, 'users', state.user.uid, 'spaces', state.activeSpaceId), { name: state.activeSpaceName, windows: state.windows, lastModified: new Date().toISOString() }, { merge: true }); if(sEl) sEl.innerText = "Saved"; } catch(e) { if(sEl) sEl.innerText = "Error"; }
+                }
+            }, 1000);
+        }
+    </script>
+</body>
+</html>
