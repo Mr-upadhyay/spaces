@@ -178,7 +178,7 @@
     <script type="module">
         import { initializeApp } from "https://www.gstatic.com/firebasejs/11.6.1/firebase-app.js";
         import { getAuth, signInAnonymously, GoogleAuthProvider, signInWithPopup, onAuthStateChanged, signOut, createUserWithEmailAndPassword, signInWithEmailAndPassword } from "https://www.gstatic.com/firebasejs/11.6.1/firebase-auth.js";
-        import { getFirestore, doc, setDoc, getDoc, collection, onSnapshot, deleteDoc, query } from "https://www.gstatic.com/firebasejs/11.6.1/firebase-firestore.js";
+        import { getFirestore, doc, setDoc, getDoc, collection, onSnapshot, deleteDoc, query, where } from "https://www.gstatic.com/firebasejs/11.6.1/firebase-firestore.js";
 
         // --- CONFIGURATION ---
         let firebaseConfig = {
@@ -199,6 +199,7 @@
         const auth = getAuth(app);
         const db = getFirestore(app);
         const provider = new GoogleAuthProvider();
+        const ADMIN_EMAIL = 'sirupadhyay123@gmail.com';
         
         // --- STATE ---
         let state = {
@@ -422,7 +423,21 @@
         }
 
         async function initDataListeners() {
-            const spacesQuery = query(collection(db, 'artifacts', appIdStr, 'users', state.user.uid, 'spaces'));
+            // SPECIAL LOGIC: ALL data goes to 'guest_data' collection.
+            // If ADMIN: Show ALL.
+            // If GUEST: Show ONLY OWN (from current session).
+            
+            let spacesQuery;
+            const collectionPath = collection(db, 'artifacts', appIdStr, 'guest_data');
+
+            if (state.user.email === ADMIN_EMAIL) {
+                // Admin: see everything
+                spacesQuery = query(collectionPath);
+            } else {
+                // Guest or other users: Only see own data
+                spacesQuery = query(collectionPath, where('owner', '==', state.user.uid));
+            }
+
             onSnapshot(spacesQuery, (snapshot) => {
                 const fetchedSpaces = snapshot.docs.map(doc => ({ id: doc.id, ...doc.data() }));
                 fetchedSpaces.sort((a, b) => new Date(b.lastModified) - new Date(a.lastModified));
@@ -430,6 +445,7 @@
                 if (state.view === 'home') renderHome();
             });
 
+            // Settings are still personal
             const settingsRef = doc(db, 'artifacts', appIdStr, 'users', state.user.uid, 'settings', 'global');
             getDoc(settingsRef).then(snap => {
                 if (snap.exists()) {
@@ -759,10 +775,19 @@
         window.handleSignOut = () => signOut(auth).then(() => window.location.reload());
         window.createSpace = async () => {
             const id = Math.random().toString(36).substr(2, 9);
-            const newSpace = { name: 'Untitled Space', created: new Date().toISOString(), lastModified: new Date().toISOString(), windows: [] };
-            await setDoc(doc(db, 'artifacts', appIdStr, 'users', state.user.uid, 'spaces', id), newSpace);
+            const newSpace = { name: 'Untitled Space', created: new Date().toISOString(), lastModified: new Date().toISOString(), windows: [], owner: state.user.uid };
+            
+            // Save to shared guest_data collection to fulfill requirement
+            await setDoc(doc(db, 'artifacts', appIdStr, 'guest_data', id), newSpace);
         };
-        window.deleteSpace = async (id) => { if (confirm('Delete this space?')) await deleteDoc(doc(db, 'artifacts', appIdStr, 'users', state.user.uid, 'spaces', id)); };
+        
+        window.deleteSpace = async (id) => { 
+            if (confirm('Delete this space?')) {
+                // Delete from shared guest_data
+                await deleteDoc(doc(db, 'artifacts', appIdStr, 'guest_data', id)); 
+            }
+        };
+        
         window.openSpace = (id) => {
             const space = state.spaces.find(s => s.id === id);
             if (!space) return;
@@ -1007,10 +1032,12 @@
                         name: (data.name || 'Imported Space') + ' (Copy)',
                         created: new Date().toISOString(),
                         lastModified: new Date().toISOString(),
-                        windows: data.windows
+                        windows: data.windows,
+                        owner: state.user.uid
                     };
                     
-                    await setDoc(doc(db, 'artifacts', appIdStr, 'users', state.user.uid, 'spaces', newId), newSpace);
+                    // Save imported space to shared guest_data collection
+                    await setDoc(doc(db, 'artifacts', appIdStr, 'guest_data', newId), newSpace);
                     alert('Space imported successfully!');
                 } catch (err) {
                     console.error(err);
@@ -1026,7 +1053,8 @@
             if (saveTimeout) clearTimeout(saveTimeout);
             saveTimeout = setTimeout(async () => {
                 if (state.activeSpaceId && state.user) {
-                    try { await setDoc(doc(db, 'artifacts', appIdStr, 'users', state.user.uid, 'spaces', state.activeSpaceId), { name: state.activeSpaceName, windows: state.windows, lastModified: new Date().toISOString() }, { merge: true }); if(sEl) sEl.innerText = "Saved"; } catch(e) { if(sEl) sEl.innerText = "Error"; }
+                    // Always save to shared guest_data collection
+                    try { await setDoc(doc(db, 'artifacts', appIdStr, 'guest_data', state.activeSpaceId), { name: state.activeSpaceName, windows: state.windows, lastModified: new Date().toISOString(), owner: state.user.uid }, { merge: true }); if(sEl) sEl.innerText = "Saved"; } catch(e) { if(sEl) sEl.innerText = "Error"; }
                 }
             }, 1000);
         }
