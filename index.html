@@ -98,20 +98,33 @@
         }
 
         /* INTERACTION MODES */
+        
+        /* Space Pressed: Disable Iframe interaction to allow Window Drag/Resize */
         body.space-pressed .window-content,
         body.space-pressed iframe, 
         body.space-pressed textarea {
             pointer-events: none !important;
             cursor: move;
         }
+
+        /* Ctrl Pressed: We ALLOW pointer events on iframes so native PDF Zoom/Pan works. 
+           OS-level zoom logic is handled via 'window.isCtrlDown' checks in handlers, 
+           but for iframes we defer to browser/plugin behavior. */
+        
         body.ctrl-pressed .window-content,
-        body.ctrl-pressed iframe, 
         body.ctrl-pressed textarea {
-            pointer-events: none !important;
-            cursor: grab;
+            cursor: zoom-in; /* Visual cue */
         }
+
         body.ctrl-pressed.panning .window-content {
             cursor: grabbing;
+        }
+
+        /* Prevent Text Selection during Panning (Fix for blue highlight) */
+        body.panning, 
+        body.panning * {
+            user-select: none !important;
+            -webkit-user-select: none !important;
         }
 
         /* Auto Hide Top Bar Logic */
@@ -191,6 +204,7 @@
             activeSpaceName: '',
             windows: [], 
             history: [],
+            future: [], // Added for Redo
             activeWindowId: null,
             settings: { compactMode: false, ghostMode: false, darkMode: false, autoHideTopBar: false, fullScreen: false },
             view: 'home',
@@ -275,6 +289,7 @@
             state.activeSpaceName = space.name;
             state.windows = space.windows ? JSON.parse(JSON.stringify(space.windows)) : [];
             state.history = []; 
+            state.future = []; // Clear history on load
             state.view = 'workspace';
             renderWorkspace();
         };
@@ -300,41 +315,53 @@
             state.activeSpaceName = newSpace.name;
             state.windows = [];
             state.history = [];
+            state.future = [];
             state.view = 'workspace';
             renderWorkspace();
             await setDoc(doc(db, 'artifacts', appIdStr, 'guest_data', id), newSpace);
         };
 
         // --- GLOBAL INPUTS ---
-        let isSpaceDown = false;
-        let isCtrlDown = false;
+        window.isSpaceDown = false;
+        window.isCtrlDown = false;
 
         window.addEventListener('keydown', (e) => {
+            // Added capture: true to try and intercept before iframe (if possible/focused on window)
+            // This attempts to address the PDF conflict by catching Space early
             if (e.code === 'Space' && !e.repeat && e.target.tagName !== 'INPUT' && e.target.tagName !== 'TEXTAREA') {
                 e.preventDefault();
-                isSpaceDown = true;
+                window.isSpaceDown = true;
                 document.body.classList.add('space-pressed');
             }
             if (e.key === 'Control' || e.key === 'Meta') {
-                isCtrlDown = true;
+                window.isCtrlDown = true;
                 document.body.classList.add('ctrl-pressed');
             }
+            // Undo: Ctrl+Z
             if ((e.ctrlKey || e.metaKey) && e.key === 'z') {
                 if (e.target.tagName !== 'INPUT' && e.target.tagName !== 'TEXTAREA') {
                     e.preventDefault();
                     window.undo();
                 }
             }
-        });
+            // Redo: Ctrl+Y
+            if ((e.ctrlKey || e.metaKey) && e.key === 'y') {
+                if (e.target.tagName !== 'INPUT' && e.target.tagName !== 'TEXTAREA') {
+                    e.preventDefault();
+                    window.redo();
+                }
+            }
+        }, { capture: true }); // Capture phase listener
 
         window.addEventListener('keyup', (e) => {
-            if (e.code === 'Space') { isSpaceDown = false; document.body.classList.remove('space-pressed'); }
-            if (e.key === 'Control' || e.key === 'Meta') { isCtrlDown = false; document.body.classList.remove('ctrl-pressed'); }
-        });
+            if (e.code === 'Space') { window.isSpaceDown = false; document.body.classList.remove('space-pressed'); }
+            if (e.key === 'Control' || e.key === 'Meta') { window.isCtrlDown = false; document.body.classList.remove('ctrl-pressed'); }
+        }, { capture: true });
         
         window.addEventListener('blur', () => { 
-            isSpaceDown = false; isCtrlDown = false;
-            document.body.classList.remove('space-pressed', 'ctrl-pressed');
+            // Optional: Don't clear immediately if we want to sustain state, but usually safer to clear
+            // window.isSpaceDown = false; window.isCtrlDown = false;
+            // document.body.classList.remove('space-pressed', 'ctrl-pressed');
         });
 
         // Drag and Drop for Files
@@ -503,6 +530,8 @@
         }
 
         function saveToHistory() {
+            // Undo/Redo Logic: clear future on new action
+            state.future = []; 
             const snapshot = JSON.parse(JSON.stringify(state.windows));
             state.history.push(snapshot);
             if (state.history.length > 20) state.history.shift();
@@ -510,8 +539,20 @@
 
         window.undo = () => {
             if (state.history.length === 0) return;
+            const current = JSON.parse(JSON.stringify(state.windows));
+            state.future.push(current); // Push current to future
             const previousState = state.history.pop();
             state.windows = previousState;
+            syncWindowsUI();
+            saveSpace();
+        };
+
+        window.redo = () => {
+            if (state.future.length === 0) return;
+            const current = JSON.parse(JSON.stringify(state.windows));
+            state.history.push(current); // Push current to history
+            const nextState = state.future.pop();
+            state.windows = nextState;
             syncWindowsUI();
             saveSpace();
         };
@@ -559,7 +600,8 @@
                 width: 500, height: 400, 
                 zIndex: 10 + state.windows.length, 
                 isMinimized: false, 
-                zoom: initialZoom 
+                zoom: initialZoom,
+                panX: 0, panY: 0
             });
             state.activeWindowId = id;
             syncWindowsUI(); saveSpace();
@@ -718,17 +760,32 @@
                 if (!el) {
                     el = document.createElement('div');
                     el.id = `win-${win.id}`;
-                    el.className = `window absolute flex flex-col bg-white dark:bg-slate-800 rounded-lg shadow-xl border border-gray-200 dark:border-slate-700 overflow-hidden ${win.isMaximized ? 'w-full h-full left-0 top-0 !transform-none !rounded-none z-[49]' : ''}`;
+                    // Added tabindex="-1" to allow window to receive focus programmatically or on click
+                    el.className = `window absolute flex flex-col bg-white dark:bg-slate-800 rounded-lg shadow-xl border border-gray-200 dark:border-slate-700 overflow-hidden outline-none ${win.isMaximized ? 'w-full h-full left-0 top-0 !transform-none !rounded-none z-[49]' : ''}`;
+                    el.setAttribute('tabindex', '-1'); 
+                    // Attach wheel handler to the window container to capture events even if content has pointer-events: none (via spacebar)
+                    el.onwheel = (e) => window.handleWindowWheel(e, win.id);
+                    // Add mouseenter to force focus back to main window so Spacebar works for resizing
+                    el.onmouseenter = () => { if(document.activeElement !== document.body) window.focus(); };
+                    // Attach mousedown to container to allow Space+Drag from anywhere on window
+                    el.onmousedown = (e) => { 
+                        if(window.isSpaceDown || window.isCtrlDown || e.ctrlKey) {
+                            window.startDrag(e, win.id);
+                        } else {
+                            window.focusWindow(win.id);
+                        }
+                    };
+
                     el.innerHTML = `
                         <div class="window-header h-9 bg-gray-50 dark:bg-slate-900 border-b border-gray-200 dark:border-slate-700 flex items-center justify-between px-3 cursor-move shrink-0 select-none" 
-                             onmousedown="window.startDrag(event, '${win.id}')"
+                             onmousedown="if(!window.isSpaceDown) window.startDrag(event, '${win.id}')"
                              ontouchstart="window.startDrag(event, '${win.id}')">
                             <div class="flex items-center gap-2 overflow-hidden">
                                 <i data-lucide="${win.type === 'text' ? 'sticky-note' : (win.type === 'image' ? 'image' : 'link')}" width="14" class="text-gray-400"></i>
                                 <input type="text" value="${win.title}" onchange="window.renameWindow('${win.id}', this.value)" onmousedown="event.stopPropagation()" ontouchstart="event.stopPropagation()" class="bg-transparent text-xs font-medium text-gray-700 dark:text-slate-300 outline-none w-32 truncate" />
                             </div>
                             <div class="flex items-center gap-1.5" onmousedown="event.stopPropagation()" ontouchstart="event.stopPropagation()">
-                                <button onclick="window.startPan(event, '${win.id}')" class="p-1 hover:bg-gray-200 dark:hover:bg-slate-700 rounded text-gray-400" title="Pan Content"><i data-lucide="hand" width="12"></i></button>
+                                <button onclick="window.downloadWindowContent('${win.id}')" class="p-1 hover:bg-gray-200 dark:hover:bg-slate-700 rounded text-gray-400" title="Download Content"><i data-lucide="download" width="12"></i></button>
                                 <button onclick="window.toggleMaximize('${win.id}')" class="p-1 hover:bg-gray-200 dark:hover:bg-slate-700 rounded text-gray-400"><i data-lucide="${win.isMaximized ? 'minimize-2' : 'maximize-2'}" width="12"></i></button>
                                 <button onclick="window.closeWindow('${win.id}')" class="p-1 hover:bg-red-100 hover:text-red-500 dark:hover:bg-red-900/30 rounded text-gray-400 transition-colors"><i data-lucide="x" width="12"></i></button>
                             </div>
@@ -741,7 +798,6 @@
                         <div class="resize-handle rh-s" onmousedown="window.startResize(event, '${win.id}')" ontouchstart="window.startResize(event, '${win.id}')"></div>
                         <div class="resize-handle rh-se" onmousedown="window.startResize(event, '${win.id}')" ontouchstart="window.startResize(event, '${win.id}')"></div>
                     `;
-                    el.addEventListener('mousedown', () => window.focusWindow(win.id));
                     el.addEventListener('touchstart', () => window.focusWindow(win.id), {passive: true});
                     windowsContainer.appendChild(el);
                     lucide.createIcons();
@@ -775,7 +831,12 @@
                     }
                 } else {
                      const container = el.querySelector('.content-scale-container');
-                     if(container) container.style.transform = `scale(${win.zoom})`;
+                     if(container) {
+                         // Apply both Zoom (scale) and Pan (translate) logic here
+                         const panX = win.panX || 0;
+                         const panY = win.panY || 0;
+                         container.style.transform = `scale(${win.zoom}) translate(${panX / win.zoom}px, ${panY / win.zoom}px)`;
+                     }
                 }
             });
 
@@ -797,11 +858,85 @@
             lucide.createIcons();
         }
 
+        window.downloadWindowContent = (id) => {
+            const win = state.windows.find(w => w.id === id);
+            if (!win) return;
+            const link = document.createElement('a');
+            
+            // Handle Text
+            if (win.type === 'text') {
+                const blob = new Blob([win.content], { type: 'text/plain' });
+                link.href = URL.createObjectURL(blob);
+                link.download = `${win.title || 'note'}.txt`;
+                link.click();
+            } 
+            // Handle Images & Uploaded PDFs (Data URLs)
+            else if (win.type === 'image' || (win.type === 'file' && win.content.startsWith('data:'))) {
+                link.href = win.content;
+                // Try to derive extension from mime type if possible, else default
+                let ext = 'png';
+                if(win.content.startsWith('data:application/pdf')) ext = 'pdf';
+                link.download = `${win.title || 'download'}.${ext}`;
+                link.click();
+            } 
+            // Handle External Links (Drive, etc.)
+            else {
+                link.href = win.content;
+                link.target = '_blank';
+                link.click();
+            }
+        }
+
+        // New Window Wheel Handler to implement Zoom/Resize Logic
+        window.handleWindowWheel = (e, id) => {
+            const win = state.windows.find(w => w.id === id);
+            if (!win) return;
+
+            // Scenario 1: Ctrl + Scroll = Zoom Content
+            if (window.isCtrlDown) {
+                // If it's NOT an iframe/PDF, perform OS Zoom. 
+                // If it IS a PDF, do NOTHING here (return) so native browser zoom handles it.
+                // We identify PDF/iframe by the lack of 'text'/'image' type or presence of iframe.
+                // Actually, 'file' type can contain PDF data URI in an iframe. 'drive' type is iframe.
+                const isPDF = win.type === 'drive' || (win.type === 'file' && win.content.startsWith('data:application/pdf'));
+                
+                if (isPDF) return; // Let native PDF viewer handle Ctrl+Scroll
+
+                e.preventDefault();
+                e.stopPropagation();
+                window.handleZoom(e, id);
+                return;
+            }
+
+            // Scenario 2: Space + Scroll = Resize Window (Zoom Window Size)
+            if (window.isSpaceDown) {
+                e.preventDefault();
+                e.stopPropagation();
+                // "Zooming in/out" implies scaling the dimensions
+                const scaleFactor = e.deltaY > 0 ? 0.95 : 1.05; // Scroll Down (positive) = shrink, Scroll Up = grow
+                const newWidth = win.width * scaleFactor;
+                const newHeight = win.height * scaleFactor;
+                
+                // Limits
+                win.width = Math.max(200, newWidth);
+                win.height = Math.max(150, newHeight);
+                
+                syncWindowsUI();
+                if(saveTimeout) clearTimeout(saveTimeout);
+                saveTimeout = setTimeout(saveSpace, 1000);
+                return;
+            }
+
+            // Default: Let natural scroll happen (Textarea scrolling or Iframe scrolling)
+            // Note: Iframes handle their own scrolling if pointer-events are auto.
+        };
+
         function getWindowContentHTML(win) {
             if (win.type === 'text') {
-                return `<textarea class="w-full h-full p-4 bg-transparent resize-none outline-none dark:text-slate-200 font-mono leading-relaxed" spellcheck="false" oninput="window.updateWindowContent('${win.id}', this.value)" onwheel="if(event.ctrlKey){ event.preventDefault(); window.handleZoom(event, '${win.id}'); }">${win.content}</textarea>`;
+                return `<textarea class="w-full h-full p-4 bg-transparent resize-none outline-none dark:text-slate-200 font-mono leading-relaxed" spellcheck="false" oninput="window.updateWindowContent('${win.id}', this.value)">${win.content}</textarea>`;
             } else if (win.type === 'image') {
-                return `<div class="w-full h-full flex items-center justify-center overflow-hidden bg-gray-100 dark:bg-slate-950/50" onwheel="if(event.ctrlKey){ event.preventDefault(); window.handleZoom(event, '${win.id}'); }"><div class="content-scale-container transition-transform origin-center"><img src="${win.content}" class="max-w-none shadow-lg" style="pointer-events:none;" /></div></div>`;
+                // CHANGED: Added w-full h-full and object-contain to image to fix "Empty Space" issue on resize
+                return `<div class="w-full h-full flex items-center justify-center overflow-hidden bg-gray-100 dark:bg-slate-950/50"><div class="content-scale-container w-full h-full flex items-center justify-center transition-transform origin-center"><img src="${win.content}" class="max-w-none shadow-lg" style="pointer-events:none; width: 100%; height: 100%; object-fit: contain;" /></div></div>`;
             } else {
                 return `<iframe src="${win.content}" class="w-full h-full border-none bg-white" allowfullscreen></iframe><div class="absolute inset-0 bg-transparent pointer-events-none" style="${state.isDragging ? 'pointer-events:auto' : ''}"></div>`;
             }
@@ -816,7 +951,16 @@
             const evt = e.touches ? e.touches[0] : e;
             const target = e.target;
             
-            if (target.closest('button') || target.tagName === 'INPUT' || (e.ctrlKey && !e.touches)) return; 
+            // NEW: If Ctrl is pressed, immediately start panning (Requested Feature)
+            if (e.ctrlKey || window.isCtrlDown) {
+                window.startPan(e, id);
+                return;
+            }
+
+            // Allow drag on any element if Space is down, otherwise limit checks
+            if (!window.isSpaceDown) {
+                 if (target.closest('button') || target.tagName === 'INPUT') return; 
+            }
             
             const win = state.windows.find(w => w.id === id); 
             if (win.isMaximized) return; 
@@ -868,7 +1012,17 @@
             isPanning = true; 
             document.body.classList.add('panning'); 
             const container = document.querySelector(`#win-${id} textarea`) || document.querySelector(`#win-${id} .window-content`); 
-            dragStart = { x: evt.clientX, y: evt.clientY, scrollX: container ? container.scrollLeft : 0, scrollY: container ? container.scrollTop : 0 }; 
+            
+            // Initialize pan values if undefined
+            if(typeof win.panX === 'undefined') win.panX = 0;
+            if(typeof win.panY === 'undefined') win.panY = 0;
+
+            dragStart = { 
+                x: evt.clientX, y: evt.clientY, 
+                scrollX: container ? container.scrollLeft : 0, 
+                scrollY: container ? container.scrollTop : 0,
+                panX: win.panX, panY: win.panY
+            }; 
             
             if(e.touches) {
                 document.addEventListener('touchmove', handleGlobalTouchMove, {passive: false});
@@ -899,7 +1053,15 @@
         };
 
         // Handlers for Mouse
-        function handleGlobalMouseMove(e) { processMove(e.clientX, e.clientY); }
+        function handleGlobalMouseMove(e) { 
+            // Update global state for Ctrl key during mouse move to help with iframe conflict
+            if (window.isCtrlDown !== e.ctrlKey) {
+                window.isCtrlDown = e.ctrlKey;
+                if(e.ctrlKey) document.body.classList.add('ctrl-pressed');
+                else document.body.classList.remove('ctrl-pressed');
+            }
+            processMove(e.clientX, e.clientY); 
+        }
         function handleGlobalMouseUp(e) { processEnd(e.clientX); }
 
         // Handlers for Touch
@@ -919,12 +1081,21 @@
             const dy = clientY - dragStart.y; 
             
             if (isPanning) { 
-                const el = document.getElementById(`win-${dragTarget.id}`); 
-                const container = el.querySelector('textarea') || el.querySelector('.window-content'); 
-                if (container) { 
-                    container.scrollLeft = dragStart.scrollX - dx; 
-                    container.scrollTop = dragStart.scrollY - dy; 
+                // For Images/Content that use transform-based panning
+                if (dragTarget.type === 'image') {
+                    dragTarget.panX = dragStart.panX + dx;
+                    dragTarget.panY = dragStart.panY + dy;
+                    syncWindowsUI();
                 } 
+                // For Text (standard scrolling)
+                else {
+                    const el = document.getElementById(`win-${dragTarget.id}`); 
+                    const container = el.querySelector('textarea') || el.querySelector('.window-content'); 
+                    if (container) { 
+                        container.scrollLeft = dragStart.scrollX - dx; 
+                        container.scrollTop = dragStart.scrollY - dy; 
+                    } 
+                }
                 return; 
             } 
             
